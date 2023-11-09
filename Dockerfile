@@ -137,6 +137,7 @@ COPY --link --from=buildctl /usr/bin/buildctl /
 
 FROM scratch AS binaries-windows
 COPY --link --from=buildctl /usr/bin/buildctl /buildctl.exe
+COPY --link --from=buildkitd /usr/bin/buildkitd /buildkitd.exe
 
 FROM scratch AS binaries-freebsd
 COPY --link --from=buildkitd /usr/bin/buildkitd /
