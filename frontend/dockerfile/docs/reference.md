@@ -288,10 +288,46 @@ modifiers as specified below:
 - `${variable:+word}` indicates that if `variable` is set then `word` will be
   the result, otherwise the result is the empty string.
 
+The following variable replacements are supported in a pre-release version of
+Dockerfile syntax, when using the `# syntax=docker/dockerfile-upstream:master` syntax
+directive in your Dockerfile:
+
+- `${variable#pattern}` removes the shortest match of `pattern` from `variable`,
+  seeking from the start of the string.
+  
+  ```bash
+  str=foobarbaz echo ${str#f*b}     # arbaz
+  ```
+  
+- `${variable##pattern}` removes the longest match of `pattern` from `variable`,
+  seeking from the start of the string.
+
+  ```bash
+  str=foobarbaz echo ${str##f*b}    # az
+  ```
+
+- `${variable%pattern}` removes the shortest match of `pattern` from `variable`,
+  seeking backwards from the end of the string.
+
+  ```bash
+  string=foobarbaz echo ${string%b*}    # foobar
+  ```
+
+- `${variable%%pattern}` removes the longest match of `pattern` from `variable`,
+  seeking backwards from the end of the string.
+
+  ```bash
+  string=foobarbaz echo ${string%%b*}   # foo
+  ```
+
 In all cases, `word` can be any string, including additional environment
 variables.
 
-Escaping is possible by adding a `\` before the variable: `\$foo` or `\${foo}`,
+`pattern` is a glob pattern where `?` matches any single character
+and `*` any number of characters (including zero). To match literal `?` and `*`,
+use a backslash escape: `\?` and `\*`.
+
+You can escape whole variable names by adding a `\` before the variable: `\$foo` or `\${foo}`,
 for example, will translate to `$foo` and `${foo}` literals respectively.
 
 Example (parsed representation is displayed after the `#`):
@@ -707,7 +743,7 @@ The command is run in the host's network environment (similar to
 > which needs to be enabled when starting the buildkitd daemon with
 > `--allow-insecure-entitlement network.host` flag or in [buildkitd config](https://github.com/moby/buildkit/blob/master/docs/buildkitd.toml.md),
 > and for a build request with [`--allow network.host` flag](https://docs.docker.com/engine/reference/commandline/buildx_build/#allow).
-{:.warning}
+{ .warning }
 
 ## RUN --security
 
@@ -727,7 +763,7 @@ This is equivalent to running `docker run --privileged`.
 > enabled when starting the buildkitd daemon with
 > `--allow-insecure-entitlement security.insecure` flag or in [buildkitd config](https://github.com/moby/buildkit/blob/master/docs/buildkitd.toml.md),
 > and for a build request with [`--allow security.insecure` flag](https://docs.docker.com/engine/reference/commandline/buildx_build/#allow).
-{:.warning}
+{ .warning }
 
 #### Example: check entitlements
 
@@ -1958,7 +1994,7 @@ ARG buildno
 > 
 > Refer to the [`RUN --mount=type=secret`](#run---mounttypesecret) section to
 > learn about secure ways to use secrets when building images.
-{:.warning}
+{ .warning }
 
 ### Default values
 
