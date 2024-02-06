@@ -41,6 +41,7 @@ import (
 )
 
 func testProvenanceAttestation(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -231,6 +232,7 @@ RUN echo "ok" > /foo
 }
 
 func testGitProvenanceAttestation(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -378,6 +380,7 @@ COPY myapp.Dockerfile /
 }
 
 func testMultiPlatformProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureMultiPlatform, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -493,6 +496,7 @@ RUN echo "ok-$TARGETARCH" > /foo
 }
 
 func testClientFrontendProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
 	// Building with client frontend does not capture frontend provenance
 	// because frontend runs in client, not in BuildKit.
@@ -687,6 +691,7 @@ func testClientFrontendProvenance(t *testing.T, sb integration.Sandbox) {
 }
 
 func testClientLLBProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -801,6 +806,7 @@ func testClientLLBProvenance(t *testing.T, sb integration.Sandbox) {
 }
 
 func testSecretSSHProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -878,6 +884,7 @@ RUN --mount=type=secret,id=mysecret --mount=type=secret,id=othersecret --mount=t
 }
 
 func testOCILayoutProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -1011,6 +1018,7 @@ EOF
 }
 
 func testNilProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -1048,6 +1056,7 @@ ENV FOO=bar
 
 // https://github.com/moby/buildkit/issues/3562
 func testDuplicatePlatformProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureProvenance)
 	ctx := sb.Context()
 
@@ -1078,6 +1087,7 @@ func testDuplicatePlatformProvenance(t *testing.T, sb integration.Sandbox) {
 
 // https://github.com/moby/buildkit/issues/3928
 func testDockerIgnoreMissingProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureProvenance)
 	c, err := client.New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -1120,6 +1130,7 @@ func testDockerIgnoreMissingProvenance(t *testing.T, sb integration.Sandbox) {
 }
 
 func testFrontendDeduplicateSources(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -1267,4 +1278,86 @@ COPY bar bar2
 
 	require.Equal(t, dockerfile, sources[0].Data)
 	require.NotEqual(t, 0, len(sources[0].Definition))
+}
+
+func testDuplicateLayersProvenance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
+	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureProvenance)
+	ctx := sb.Context()
+
+	c, err := client.New(ctx, sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	registry, err := sb.NewRegistry()
+	if errors.Is(err, integration.ErrRequirements) {
+		t.Skip(err.Error())
+	}
+	require.NoError(t, err)
+
+	f := getFrontend(t, sb)
+
+	// Create a triangle shape with the layers.
+	// This will trigger the provenance attestation to attempt to add the base
+	// layer multiple times.
+	dockerfile := []byte(`
+FROM busybox:latest AS base
+
+FROM base AS a
+RUN date +%s > /a.txt
+
+FROM base AS b
+COPY --from=a /a.txt /
+RUN date +%s > /b.txt
+`)
+	dir := integration.Tmpdir(
+		t,
+		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+	)
+
+	target := registry + "/buildkit/testwithprovenance:dup"
+
+	_, err = f.Solve(sb.Context(), c, client.SolveOpt{
+		LocalDirs: map[string]string{
+			dockerui.DefaultLocalNameDockerfile: dir,
+			dockerui.DefaultLocalNameContext:    dir,
+		},
+		FrontendAttrs: map[string]string{
+			"attest:provenance": "mode=max",
+			"filename":          "Dockerfile",
+		},
+		Exports: []client.ExportEntry{
+			{
+				Type: client.ExporterImage,
+				Attrs: map[string]string{
+					"name": target,
+					"push": "true",
+				},
+			},
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	desc, provider, err := contentutil.ProviderFromRef(target)
+	require.NoError(t, err)
+	imgs, err := testutil.ReadImages(sb.Context(), provider, desc)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(imgs.Images))
+
+	att := imgs.Find("unknown/unknown")
+	require.NotNil(t, att)
+
+	var stmt struct {
+		Predicate provenance.ProvenancePredicate `json:"predicate"`
+	}
+	require.NoError(t, json.Unmarshal(att.LayersRaw[0], &stmt))
+	pred := stmt.Predicate
+
+	// Search for the layer list for step0.
+	metadata := pred.Metadata
+	require.NotNil(t, metadata)
+
+	layers := metadata.BuildKitMetadata.Layers["step0:0"]
+	require.NotNil(t, layers)
+	require.Len(t, layers, 1)
 }

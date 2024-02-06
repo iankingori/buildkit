@@ -31,7 +31,7 @@ func testRunDefaultNetwork(t *testing.T, sb integration.Sandbox) {
 	if os.Getenv("BUILDKIT_RUN_NETWORK_INTEGRATION_TESTS") == "" {
 		t.SkipNow()
 	}
-	if sb.Rootless() {
+	if sb.Rootless() { // bridge is not used by default, even with detach-netns
 		t.SkipNow()
 	}
 
@@ -151,6 +151,7 @@ RUN --network=host nc 127.0.0.1 %s | grep foo
 }
 
 func testRunGlobalNetwork(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	s, err := echoserver.NewTestServer("foo")

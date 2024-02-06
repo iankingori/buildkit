@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile-upstream:master
 
-ARG RUNC_VERSION=v1.1.9
-ARG CONTAINERD_VERSION=v1.7.7
+ARG RUNC_VERSION=v1.1.12
+ARG CONTAINERD_VERSION=v1.7.11
 # containerd v1.6 for integration tests
 ARG CONTAINERD_ALT_VERSION_16=v1.6.24
 ARG REGISTRY_VERSION=2.8.3
-ARG ROOTLESSKIT_VERSION=v1.0.1
+ARG ROOTLESSKIT_VERSION=v2.0.0
 ARG CNI_VERSION=v1.3.0
 ARG STARGZ_SNAPSHOTTER_VERSION=v0.14.3
 ARG NERDCTL_VERSION=v1.6.2
@@ -122,13 +122,75 @@ RUN --mount=target=. --mount=target=/root/.cache,type=cache \
   set -ex
   xx-go build ${GOBUILDFLAGS} -gcflags="${GOGCFLAGS}" -ldflags "$(cat /tmp/.ldflags) -extldflags '-static'" -tags "osusergo netgo static_build seccomp ${BUILDKITD_TAGS}" -o /usr/bin/buildkitd ./cmd/buildkitd
   xx-verify ${VERIFYFLAGS} /usr/bin/buildkitd
-  if [ "$(xx-info os)" = "linux" ]; then /usr/bin/buildkitd --version; fi
+
+  # buildkitd --version can be flaky when running through emulation related to
+  # https://github.com/moby/buildkit/pull/4491. Retry a few times as a workaround.
+  set +ex
+  if [ "$(xx-info os)" = "linux" ]; then
+    max_retries=5
+    for attempt in $(seq "$max_retries"); do
+      timeout 3 /usr/bin/buildkitd --version
+      exitcode=$?
+      if ! xx-info is-cross; then
+        exit $exitcode
+      elif [ $exitcode -eq 0 ]; then
+        break
+      elif [ $exitcode -eq 124 ] || [ $exitcode -eq 143 ]; then
+        echo "WARN: buildkitd --version timed out ($attempt/$max_retries)"
+        if [ "$attempt" -eq "$max_retries" ]; then
+          exit $exitcode
+        fi
+      else
+        echo "ERROR: buildkitd --version failed with exit code $exitcode"
+      fi
+      sleep 1
+    done
+  fi
 EOT
+
+# dnsname source
+FROM git AS dnsname-src
+ARG DNSNAME_VERSION
+WORKDIR /usr/src
+RUN git clone https://github.com/containers/dnsname.git dnsname \
+  && cd dnsname && git checkout -q "$DNSNAME_VERSION"
+
+# build dnsname CNI plugin for testing
+FROM gobuild-base AS dnsname
+WORKDIR /go/src/github.com/containers/dnsname
+ARG TARGETPLATFORM
+RUN --mount=from=dnsname-src,src=/usr/src/dnsname,target=.,rw \
+    --mount=target=/root/.cache,type=cache \
+    CGO_ENABLED=0 xx-go build -o /usr/bin/dnsname ./plugins/meta/dnsname && \
+    xx-verify --static /usr/bin/dnsname
+
+FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS cni-plugins
+RUN apk add --no-cache curl
+COPY --from=xx / /
+ARG CNI_VERSION
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETPLATFORM
+WORKDIR /opt/cni/bin
+RUN curl -Ls https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-${TARGETOS}-${TARGETARCH}-${CNI_VERSION}.tgz | tar xzv
+RUN xx-verify --static bridge loopback host-local
+COPY --link --from=dnsname /usr/bin/dnsname /opt/cni/bin/
+
+FROM scratch AS cni-plugins-export
+COPY --link --from=cni-plugins /opt/cni/bin/bridge /buildkit-cni-bridge
+COPY --link --from=cni-plugins /opt/cni/bin/loopback /buildkit-cni-loopback
+COPY --link --from=cni-plugins /opt/cni/bin/host-local /buildkit-cni-host-local
+COPY --link --from=cni-plugins /opt/cni/bin/firewall /buildkit-cni-firewall
+
+FROM scratch AS cni-plugins-export-squashed
+COPY --from=cni-plugins-export / /
+
 
 FROM scratch AS binaries-linux
 COPY --link --from=runc /usr/bin/runc /buildkit-runc
 # built from https://github.com/tonistiigi/binfmt/releases/tag/buildkit%2Fv7.1.0-30
 COPY --link --from=tonistiigi/binfmt:buildkit-v7.1.0-30@sha256:45dd57b4ba2f24e2354f71f1e4e51f073cb7a28fd848ce6f5f2a7701142a6bf0 / /
+COPY --link --from=cni-plugins-export-squashed / /
 COPY --link --from=buildctl /usr/bin/buildctl /
 COPY --link --from=buildkitd /usr/bin/buildkitd /
 
@@ -264,34 +326,9 @@ FROM binaries AS buildkit-windows
 # this is not in binaries-windows because it is not intended for release yet, just CI
 COPY --link --from=buildkitd /usr/bin/buildkitd /buildkitd.exe
 
-# dnsname source
-FROM git AS dnsname-src
-ARG DNSNAME_VERSION
-WORKDIR /usr/src
-RUN git clone https://github.com/containers/dnsname.git dnsname \
-  && cd dnsname && git checkout -q "$DNSNAME_VERSION"
-
-# build dnsname CNI plugin for testing
-FROM gobuild-base AS dnsname
-WORKDIR /go/src/github.com/containers/dnsname
-ARG TARGETPLATFORM
-RUN --mount=from=dnsname-src,src=/usr/src/dnsname,target=.,rw \
-    --mount=target=/root/.cache,type=cache \
-    CGO_ENABLED=0 xx-go build -o /usr/bin/dnsname ./plugins/meta/dnsname && \
-    xx-verify --static /usr/bin/dnsname
-
-FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS cni-plugins
-RUN apk add --no-cache curl
-ARG CNI_VERSION
-ARG TARGETOS
-ARG TARGETARCH
-WORKDIR /opt/cni/bin
-RUN curl -Ls https://github.com/containernetworking/plugins/releases/download/$CNI_VERSION/cni-plugins-$TARGETOS-$TARGETARCH-$CNI_VERSION.tgz | tar xzv
-COPY --link --from=dnsname /usr/bin/dnsname /opt/cni/bin/
-
 FROM buildkit-base AS integration-tests-base
 ENV BUILDKIT_INTEGRATION_ROOTLESS_IDPAIR="1000:1000"
-RUN apk add --no-cache shadow shadow-uidmap sudo vim iptables ip6tables dnsmasq fuse curl git-daemon openssh-client \
+RUN apk add --no-cache shadow shadow-uidmap sudo vim iptables ip6tables dnsmasq fuse curl git-daemon openssh-client slirp4netns iproute2 \
   && useradd --create-home --home-dir /home/user --uid 1000 -s /bin/sh user \
   && echo "XDG_RUNTIME_DIR=/run/user/1000; export XDG_RUNTIME_DIR" >> /home/user/.profile \
   && mkdir -m 0700 -p /run/user/1000 \
@@ -305,7 +342,7 @@ ARG AZURITE_VERSION
 RUN apk add --no-cache nodejs npm \
   && npm install -g azurite@${AZURITE_VERSION}
 # The entrypoint script is needed for enabling nested cgroup v2 (https://github.com/moby/buildkit/issues/3265#issuecomment-1309631736)
-RUN curl -Ls https://raw.githubusercontent.com/moby/moby/v20.10.21/hack/dind > /docker-entrypoint.sh \
+RUN curl -Ls https://raw.githubusercontent.com/moby/moby/v25.0.1/hack/dind > /docker-entrypoint.sh \
   && chmod 0755 /docker-entrypoint.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 # musl is needed to directly use the registry binary that is built on alpine

@@ -255,7 +255,7 @@ type Job struct {
 	startedTime   time.Time
 	completedTime time.Time
 
-	progressCloser func()
+	progressCloser func(error)
 	SessionID      string
 	uniqueID       string // unique ID is used for provenance. We use a different field that client can't control
 }
@@ -278,6 +278,49 @@ func NewSolver(opts SolverOpt) *Solver {
 	jl.s = newScheduler(jl)
 	jl.updateCond = sync.NewCond(jl.mu.RLocker())
 	return jl
+}
+
+// hasOwner returns true if the provided target edge (or any of it's sibling
+// edges) has the provided owner.
+func (jl *Solver) hasOwner(target Edge, owner Edge) bool {
+	jl.mu.RLock()
+	defer jl.mu.RUnlock()
+
+	st, ok := jl.actives[target.Vertex.Digest()]
+	if !ok {
+		return false
+	}
+
+	var owners []Edge
+	for _, e := range st.edges {
+		if e.owner != nil {
+			owners = append(owners, e.owner.edge)
+		}
+	}
+	for len(owners) > 0 {
+		var owners2 []Edge
+		for _, e := range owners {
+			st, ok = jl.actives[e.Vertex.Digest()]
+			if !ok {
+				continue
+			}
+
+			if st.vtx.Digest() == owner.Vertex.Digest() {
+				return true
+			}
+
+			for _, e := range st.edges {
+				if e.owner != nil {
+					owners2 = append(owners2, e.owner.edge)
+				}
+			}
+		}
+
+		// repeat recursively, this time with the linked owners owners
+		owners = owners2
+	}
+
+	return false
 }
 
 func (jl *Solver) setEdge(e Edge, targetEdge *edge) {
@@ -488,8 +531,9 @@ func (jl *Solver) NewJob(id string) (*Job, error) {
 }
 
 func (jl *Solver) Get(id string) (*Job, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, _ = context.WithTimeoutCause(ctx, 6*time.Second, errors.WithStack(context.DeadlineExceeded))
+	defer cancel(errors.WithStack(context.Canceled))
 
 	go func() {
 		<-ctx.Done()
@@ -589,7 +633,7 @@ func (j *Job) walkProvenance(ctx context.Context, e Edge, f func(ProvenanceProvi
 }
 
 func (j *Job) CloseProgress() {
-	j.progressCloser()
+	j.progressCloser(errors.WithStack(context.Canceled))
 	j.pw.Close()
 }
 
@@ -790,7 +834,7 @@ func (s *sharedOp) CalcSlowCache(ctx context.Context, index Index, p PreprocessF
 				if errdefs.IsCanceled(ctx, err) {
 					complete = false
 					releaseError(err)
-					err = errors.Wrap(ctx.Err(), err.Error())
+					err = errors.Wrap(context.Cause(ctx), err.Error())
 				}
 			default:
 			}
@@ -856,7 +900,7 @@ func (s *sharedOp) CacheMap(ctx context.Context, index int) (resp *cacheMapResp,
 				if errdefs.IsCanceled(ctx, err) {
 					complete = false
 					releaseError(err)
-					err = errors.Wrap(ctx.Err(), err.Error())
+					err = errors.Wrap(context.Cause(ctx), err.Error())
 				}
 			default:
 			}
@@ -935,7 +979,7 @@ func (s *sharedOp) Exec(ctx context.Context, inputs []Result) (outputs []Result,
 				if errdefs.IsCanceled(ctx, err) {
 					complete = false
 					releaseError(err)
-					err = errors.Wrap(ctx.Err(), err.Error())
+					err = errors.Wrap(context.Cause(ctx), err.Error())
 				}
 			default:
 			}

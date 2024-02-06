@@ -1,99 +1,159 @@
 package ops
 
 import (
+	"context"
 	"testing"
 
-	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/identity"
+	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/solver/pb"
-	digest "github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDedupPaths(t *testing.T) {
-	res := dedupePaths([]string{"Gemfile", "Gemfile/foo"})
-	require.Equal(t, []string{"Gemfile"}, res)
+func TestDedupePaths(t *testing.T) {
+	res := dedupePaths([]string{"/Gemfile", "/Gemfile/foo"})
+	require.Equal(t, []string{"/Gemfile"}, res)
 
-	res = dedupePaths([]string{"Gemfile/bar", "Gemfile/foo"})
-	require.Equal(t, []string{"Gemfile/bar", "Gemfile/foo"}, res)
+	res = dedupePaths([]string{"/Gemfile/bar", "/Gemfile/foo"})
+	require.Equal(t, []string{"/Gemfile/bar", "/Gemfile/foo"}, res)
 
-	res = dedupePaths([]string{"Gemfile", "Gemfile.lock"})
-	require.Equal(t, []string{"Gemfile", "Gemfile.lock"}, res)
+	res = dedupePaths([]string{"/Gemfile", "/Gemfile.lock"})
+	require.Equal(t, []string{"/Gemfile", "/Gemfile.lock"}, res)
 
-	res = dedupePaths([]string{"Gemfile.lock", "Gemfile"})
-	require.Equal(t, []string{"Gemfile", "Gemfile.lock"}, res)
+	res = dedupePaths([]string{"/Gemfile.lock", "/Gemfile"})
+	require.Equal(t, []string{"/Gemfile", "/Gemfile.lock"}, res)
 
-	res = dedupePaths([]string{"foo", "Gemfile", "Gemfile/foo"})
-	require.Equal(t, []string{"Gemfile", "foo"}, res)
+	res = dedupePaths([]string{"/foo", "/Gemfile", "/Gemfile/foo"})
+	require.Equal(t, []string{"/Gemfile", "/foo"}, res)
 
-	res = dedupePaths([]string{"foo/bar/baz", "foo/bara", "foo/bar/bax", "foo/bar"})
-	require.Equal(t, []string{"foo/bar", "foo/bara"}, res)
+	res = dedupePaths([]string{"/foo/bar/baz", "/foo/bara", "/foo/bar/bax", "/foo/bar"})
+	require.Equal(t, []string{"/foo/bar", "/foo/bara"}, res)
+
+	res = dedupePaths([]string{"/", "/foo"})
+	require.Equal(t, []string{"/"}, res)
 }
 
-func TestExecOp_getMountDeps(t *testing.T) {
-	v1 := &vertex{name: "local://context"}
-	v2 := &vertex{
-		name: "foo",
-		inputs: []solver.Edge{
-			{Vertex: v1, Index: 0},
+func TestExecOpCacheMap(t *testing.T) {
+	type testCase struct {
+		name     string
+		op1, op2 *ExecOp
+		xMatch   bool
+	}
+
+	newExecOp := func(opts ...func(*ExecOp)) *ExecOp {
+		op := &ExecOp{op: &pb.ExecOp{Meta: &pb.Meta{}}}
+		for _, opt := range opts {
+			opt(op)
+		}
+		return op
+	}
+
+	withNewMount := func(p string, cache *pb.CacheOpt) func(*ExecOp) {
+		return func(op *ExecOp) {
+			m := &pb.Mount{
+				Dest:  p,
+				Input: pb.InputIndex(op.numInputs),
+				// Generate a new selector for each mount since this should not effect the cache key.
+				// This helps exercise that code path.
+				Selector: identity.NewID(),
+			}
+			if cache != nil {
+				m.CacheOpt = cache
+				m.MountType = pb.MountType_CACHE
+			}
+			op.op.Mounts = append(op.op.Mounts, m)
+			op.numInputs++
+		}
+	}
+
+	withEmptyMounts := func(op *ExecOp) {
+		op.op.Mounts = []*pb.Mount{}
+	}
+
+	testCases := []testCase{
+		{name: "empty", op1: newExecOp(), op2: newExecOp(), xMatch: true},
+		{
+			name:   "empty vs with non-nil but empty mounts should match",
+			op1:    newExecOp(),
+			op2:    newExecOp(withEmptyMounts),
+			xMatch: true,
+		},
+		{
+			name:   "both non-nil but empty mounts should match",
+			op1:    newExecOp(withEmptyMounts),
+			op2:    newExecOp(withEmptyMounts),
+			xMatch: true,
+		},
+		{
+			name:   "non-nil but empty mounts vs with mounts should not match",
+			op1:    newExecOp(withEmptyMounts),
+			op2:    newExecOp(withNewMount("/foo", nil)),
+			xMatch: false,
+		},
+		{
+			name:   "mounts to different paths should not match",
+			op1:    newExecOp(withNewMount("/foo", nil)),
+			op2:    newExecOp(withNewMount("/bar", nil)),
+			xMatch: false,
+		},
+		{
+			name:   "mounts to same path should match",
+			op1:    newExecOp(withNewMount("/foo", nil)),
+			op2:    newExecOp(withNewMount("/foo", nil)),
+			xMatch: true,
+		},
+		{
+			name:   "cache mount should not match non-cache mount at same path",
+			op1:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someID"})),
+			op2:    newExecOp(withNewMount("/foo", nil)),
+			xMatch: false,
+		},
+		{
+			name:   "different cache id's at the same path should match",
+			op1:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someID"})),
+			op2:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someOtherID"})),
+			xMatch: true,
+		},
+		{
+			// This is a special case for default dockerfile cache mounts for backwards compatibility.
+			name:   "default dockerfile cache mount should not match the same cache mount but with different sharing",
+			op1:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "/foo"})),
+			op2:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "/foo", Sharing: pb.CacheSharingOpt_LOCKED})),
+			xMatch: false,
+		},
+		{
+			name:   "cache mounts with the same ID but different sharing options should match",
+			op1:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someID", Sharing: 0})),
+			op2:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someID", Sharing: 1})),
+			xMatch: true,
+		},
+		{
+			name:   "cache mounts with different IDs and different sharing should match at the same path",
+			op1:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someID", Sharing: 0})),
+			op2:    newExecOp(withNewMount("/foo", &pb.CacheOpt{ID: "someOtherID", Sharing: 1})),
+			xMatch: true,
 		},
 	}
-	op2, err := NewExecOp(v2, &pb.Op_Exec{
-		Exec: &pb.ExecOp{
-			Meta: &pb.Meta{
-				Args: []string{"/bin/bash", "-l"},
-			},
-			Mounts: []*pb.Mount{
-				{
-					Input:    pb.Empty,
-					Dest:     "/",
-					Readonly: true,
-					Output:   pb.SkipOutput,
-				},
-				{
-					Input:    pb.InputIndex(0),
-					Selector: "b.txt",
-					Dest:     "/test/b.txt",
-					Output:   pb.SkipOutput,
-				},
-				{
-					Input:  pb.InputIndex(0),
-					Dest:   "/test/data",
-					Output: pb.SkipOutput,
-				},
-			},
-		},
-	}, nil, nil, nil, nil, nil, nil)
-	require.NoError(t, err)
 
-	deps, err := op2.getMountDeps()
-	require.NoError(t, err)
+	ctx := context.Background()
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Len(t, deps, 1)
-	require.Len(t, deps[0].Selectors, 0)
-	require.False(t, deps[0].NoContentBasedHash)
-}
+			m1, ok, err := tc.op1.CacheMap(ctx, session.NewGroup(t.Name()), 1)
+			require.NoError(t, err)
+			require.True(t, ok)
 
-type vertex struct {
-	name   string
-	inputs []solver.Edge
-}
+			m2, ok, err := tc.op2.CacheMap(ctx, session.NewGroup(t.Name()), 1)
+			require.NoError(t, err)
+			require.True(t, ok)
 
-func (v *vertex) Digest() digest.Digest {
-	return digest.FromString(v.name)
-}
-
-func (v *vertex) Sys() interface{} {
-	return v
-}
-
-func (v *vertex) Options() solver.VertexOptions {
-	return solver.VertexOptions{}
-}
-
-func (v *vertex) Inputs() []solver.Edge {
-	return v.inputs
-}
-
-func (v *vertex) Name() string {
-	return v.name
+			if tc.xMatch {
+				require.Equal(t, m1.Digest, m2.Digest, "\n\nm1: %+v\nm2: %+v", m1, m2)
+			} else {
+				require.NotEqual(t, m1.Digest, m2.Digest, "\n\nm1: %+v\nm2: %+v", m1, m2)
+			}
+		})
+	}
 }

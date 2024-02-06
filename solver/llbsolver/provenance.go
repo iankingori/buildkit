@@ -80,6 +80,9 @@ func (b *provenanceBridge) requests(r *frontend.Result) (*resultRequests, error)
 	}
 
 	for k, ref := range r.Refs {
+		if ref == nil {
+			continue
+		}
 		r, ok := b.findByResult(ref)
 		if !ok {
 			return nil, errors.Errorf("could not find request for ref %s", ref.ID())
@@ -164,7 +167,7 @@ func (b *provenanceBridge) Solve(ctx context.Context, req frontend.SolveRequest,
 			return nil, errors.Errorf("invalid frontend: %s", req.Frontend)
 		}
 		wb := &provenanceBridge{llbBridge: b.llbBridge, req: &req}
-		res, err = f.Solve(ctx, wb, req.FrontendOpt, req.FrontendInputs, sid, b.llbBridge.sm)
+		res, err = f.Solve(ctx, wb, b.llbBridge, req.FrontendOpt, req.FrontendInputs, sid, b.llbBridge.sm)
 		if err != nil {
 			return nil, err
 		}
@@ -177,7 +180,7 @@ func (b *provenanceBridge) Solve(ctx context.Context, req frontend.SolveRequest,
 	}
 	if req.Evaluate {
 		err = res.EachRef(func(ref solver.ResultProxy) error {
-			_, err := res.Ref.Result(ctx)
+			_, err := ref.Result(ctx)
 			return err
 		})
 	}
@@ -490,12 +493,12 @@ func (ce *cacheExporter) Add(dgst digest.Digest) solver.CacheExporterRecord {
 	}
 }
 
-func (ce *cacheExporter) Visit(v interface{}) {
-	ce.m[v] = struct{}{}
+func (ce *cacheExporter) Visit(target any) {
+	ce.m[target] = struct{}{}
 }
 
-func (ce *cacheExporter) Visited(v interface{}) bool {
-	_, ok := ce.m[v]
+func (ce *cacheExporter) Visited(target any) bool {
+	_, ok := ce.m[target]
 	return ok
 }
 
@@ -517,7 +520,7 @@ func (c *cacheRecord) AddResult(dgst digest.Digest, idx int, createdAt time.Time
 		d.Annotations = containerimage.RemoveInternalLayerAnnotations(d.Annotations, true)
 		descs[i] = d
 	}
-	c.ce.layers[e] = append(c.ce.layers[e], descs)
+	c.ce.layers[e] = appendLayerChain(c.ce.layers[e], descs)
 }
 
 func (c *cacheRecord) LinkFrom(rec solver.CacheExporterRecord, index int, selector string) {
@@ -695,4 +698,26 @@ func walkDigests(dgsts []digest.Digest, ops map[digest.Digest]*pb.Op, dgst diges
 	}
 	dgsts = append(dgsts, dgst)
 	return dgsts, nil
+}
+
+// appendLayerChain appends a layer chain to the set of layers while checking for duplicate layer chains.
+func appendLayerChain(layers [][]ocispecs.Descriptor, descs []ocispecs.Descriptor) [][]ocispecs.Descriptor {
+	for _, layerDescs := range layers {
+		if len(layerDescs) != len(descs) {
+			continue
+		}
+
+		matched := true
+		for i, d := range layerDescs {
+			if d.Digest != descs[i].Digest {
+				matched = false
+				break
+			}
+		}
+
+		if matched {
+			return layers
+		}
+	}
+	return append(layers, descs)
 }

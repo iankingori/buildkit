@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	v1 "github.com/moby/buildkit/cache/remotecache/v1"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
@@ -39,6 +42,7 @@ import (
 	"github.com/moby/buildkit/frontend/subrequests"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/session"
+	"github.com/moby/buildkit/session/filesync"
 	"github.com/moby/buildkit/session/upload/uploadprovider"
 	"github.com/moby/buildkit/solver/errdefs"
 	"github.com/moby/buildkit/solver/pb"
@@ -108,6 +112,7 @@ var allTests = integration.TestFuncs(
 	testCacheMultiPlatformImportExport,
 	testOnBuildCleared,
 	testFrontendUseForwardedSolveResults,
+	testFrontendEvaluate,
 	testFrontendInputs,
 	testErrorsSourceMap,
 	testMultiArgs,
@@ -130,6 +135,7 @@ var allTests = integration.TestFuncs(
 	testNamedOCILayoutContextExport,
 	testNamedInputContext,
 	testNamedMultiplatformInputContext,
+	testNamedFilteredContext,
 	testEmptyDestDir,
 	testCopyChownCreateDest,
 	testCopyThroughSymlinkContext,
@@ -150,6 +156,7 @@ var allTests = integration.TestFuncs(
 	testWorkdirUser,
 	testWorkdirExists,
 	testWorkdirCopyIgnoreRelative,
+	testOutOfOrderStage,
 	testCopyFollowAllSymlinks,
 	testDockerfileAddChownExpand,
 	testSourceDateEpochWithoutExporter,
@@ -169,6 +176,7 @@ var allTests = integration.TestFuncs(
 	testNilContextInSolveGateway,
 	testCopyUnicodePath,
 	testFrontendDeduplicateSources,
+	testDuplicateLayersProvenance,
 )
 
 // Tests that depend on the `security.*` entitlements
@@ -244,6 +252,7 @@ func TestIntegration(t *testing.T) {
 }
 
 func testDefaultEnvWithArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -308,6 +317,7 @@ echo -n $my_arg $* > /out
 }
 
 func testEnvEmptyFormatting(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -343,6 +353,7 @@ RUN [ "$myenv" = 'foo%sbar' ]
 }
 
 func testDockerignoreOverride(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	dockerfile := []byte(`
 FROM busybox
@@ -399,6 +410,7 @@ foo
 }
 
 func testEmptyDestDir(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -428,6 +440,7 @@ RUN [ "$(cat testfile)" == "contents0" ]
 }
 
 func testExportCacheLoop(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureCacheExport, workers.FeatureCacheImport, workers.FeatureCacheBackendLocal)
 	f := getFrontend(t, sb)
 
@@ -505,6 +518,7 @@ COPY --from=base2 /foo /f
 }
 
 func testTarExporter(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -582,6 +596,7 @@ FROM stage-$TARGETOS
 }
 
 func testWorkdirCreatesDir(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -621,6 +636,7 @@ WORKDIR /
 }
 
 func testCacheReleased(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -656,6 +672,7 @@ FROM busybox
 }
 
 func testSymlinkedDockerfile(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -683,6 +700,7 @@ ENV foo bar
 }
 
 func testCopyChownExistingDir(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -776,6 +794,7 @@ RUN e="300:400"; p="/file"                         ; a=` + "`" + `stat -c "%u:%g
 }
 
 func testCopyWildcardCache(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -866,6 +885,7 @@ COPY --from=base unique /
 }
 
 func testEmptyWildcard(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -905,6 +925,7 @@ COPY foo nomatch* /
 }
 
 func testWorkdirUser(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -933,7 +954,44 @@ RUN [ "$(stat -c "%U %G" /mydir)" == "user user" ]
 	require.NoError(t, err)
 }
 
+func testOutOfOrderStage(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
+	f := getFrontend(t, sb)
+
+	for _, src := range []string{"/", "/d2"} {
+		dockerfile := []byte(fmt.Sprintf(`
+FROM busybox AS target
+COPY --from=build %s /out
+
+FROM alpine AS build
+COPY /Dockerfile /d2
+
+FROM target
+`, src))
+
+		dir := integration.Tmpdir(
+			t,
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		)
+
+		c, err := client.New(sb.Context(), sb.Address())
+		require.NoError(t, err)
+		defer c.Close()
+
+		_, err = f.Solve(sb.Context(), c, client.SolveOpt{
+			LocalDirs: map[string]string{
+				dockerui.DefaultLocalNameDockerfile: dir,
+				dockerui.DefaultLocalNameContext:    dir,
+			},
+		}, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot copy from stage")
+		require.Contains(t, err.Error(), "needs to be defined before current stage")
+	}
+}
+
 func testWorkdirCopyIgnoreRelative(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -964,6 +1022,7 @@ COPY --from=base Dockerfile .
 }
 
 func testWorkdirExists(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -993,6 +1052,7 @@ RUN [ "$(stat -c "%U %G" /mydir)" == "user user" ]
 }
 
 func testCopyChownCreateDest(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1029,6 +1089,7 @@ RUN [ "$(stat -c "%U %G" /dest01)" == "user01 user" ]
 }
 
 func testCopyThroughSymlinkContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1070,6 +1131,7 @@ COPY link/foo .
 }
 
 func testCopyThroughSymlinkMultiStage(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1111,6 +1173,7 @@ COPY --from=build /sub2/foo bar
 }
 
 func testCopySocket(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1151,6 +1214,7 @@ COPY . /
 }
 
 func testIgnoreEntrypoint(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1178,6 +1242,7 @@ RUN ["ls"]
 }
 
 func testQuotedMetaArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1222,6 +1287,7 @@ COPY --from=build /out .
 }
 
 func testMultiArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1265,6 +1331,7 @@ COPY --from=build /out .
 }
 
 func testDefaultShellAndPath(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter)
 	f := getFrontend(t, sb)
 
@@ -1352,6 +1419,7 @@ COPY Dockerfile .
 }
 
 func testExportMultiPlatform(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureMultiPlatform)
 	f := getFrontend(t, sb)
 
@@ -1488,6 +1556,7 @@ COPY arch-$TARGETARCH whoami
 
 // tonistiigi/fsutil#46
 func testContextChangeDirToFile(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1541,6 +1610,7 @@ COPY foo /
 }
 
 func testNoSnapshotLeak(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1585,6 +1655,7 @@ COPY foo /
 
 // #1197
 func testCopyFollowAllSymlinks(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1615,6 +1686,7 @@ COPY foo/sub bar
 }
 
 func testCopySymlinks(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1675,6 +1747,7 @@ COPY sub/l* alllinks/
 }
 
 func testHTTPDockerfile(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1725,6 +1798,7 @@ COPY --from=0 /foo /foo
 }
 
 func testCmdShell(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	cdAddress := sb.ContainerdAddress()
@@ -1815,6 +1889,7 @@ ENTRYPOINT my entrypoint
 }
 
 func testPullScratch(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	cdAddress := sb.ContainerdAddress()
@@ -1939,6 +2014,7 @@ COPY foo .
 }
 
 func testGlobalArg(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1968,6 +2044,7 @@ FROM busybox:${tag}
 }
 
 func testDockerfileDirs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -2033,6 +2110,7 @@ func testDockerfileDirs(t *testing.T, sb integration.Sandbox) {
 }
 
 func testDockerfileInvalidCommand(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 	dockerfile := []byte(`
@@ -2058,6 +2136,7 @@ func testDockerfileInvalidCommand(t *testing.T, sb integration.Sandbox) {
 }
 
 func testDockerfileInvalidInstruction(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 	dockerfile := []byte(`
@@ -2087,6 +2166,7 @@ func testDockerfileInvalidInstruction(t *testing.T, sb integration.Sandbox) {
 }
 
 func testDockerfileADDFromURL(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -2163,6 +2243,7 @@ ADD %s /dest/
 }
 
 func testDockerfileAddArchive(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -2317,6 +2398,7 @@ ADD %s /newname.tar.gz
 }
 
 func testDockerfileAddArchiveWildcard(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	buf := bytes.NewBuffer(nil)
@@ -2391,6 +2473,7 @@ ADD *.tar /dest
 }
 
 func testDockerfileAddChownExpand(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -2424,6 +2507,7 @@ RUN [ "$(stat -c "%u %G" /foo)" == "1000 nobody" ]
 }
 
 func testSymlinkDestination(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -2467,6 +2551,7 @@ COPY foo /symlink/
 }
 
 func testDockerfileScratchConfig(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	cdAddress := sb.ContainerdAddress()
 	if cdAddress == "" {
 		t.Skip("test requires containerd worker")
@@ -2533,6 +2618,7 @@ ENV foo=bar
 }
 
 func testExposeExpansion(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureImageExporter)
 	f := getFrontend(t, sb)
 
@@ -2608,6 +2694,7 @@ EXPOSE 5000
 }
 
 func testDockerignore(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -2678,6 +2765,7 @@ Dockerfile
 }
 
 func testDockerignoreInvalid(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -2691,8 +2779,9 @@ COPY . .
 		fstest.CreateFile(".dockerignore", []byte("!\n"), 0600),
 	)
 
-	ctx, cancel := context.WithTimeout(sb.Context(), 15*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(sb.Context())
+	ctx, _ = context.WithTimeoutCause(ctx, 15*time.Second, errors.WithStack(context.DeadlineExceeded))
+	defer cancel(errors.WithStack(context.Canceled))
 
 	c, err := client.New(ctx, sb.Address())
 	require.NoError(t, err)
@@ -2715,6 +2804,7 @@ COPY . .
 
 // moby/moby#10858
 func testDockerfileLowercase(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`FROM scratch
@@ -2741,6 +2831,7 @@ func testDockerfileLowercase(t *testing.T, sb integration.Sandbox) {
 }
 
 func testExportedHistory(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -2820,6 +2911,7 @@ RUN ["ls"]
 }
 
 func testUser(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureImageExporter)
 	f := getFrontend(t, sb)
 
@@ -2964,6 +3056,7 @@ USER nobody
 // testUserAdditionalGids ensures that that the primary GID is also included in the additional GID list.
 // CVE-2023-25173: https://github.com/advisories/GHSA-hmfx-3pcx-653p
 func testUserAdditionalGids(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -2998,6 +3091,9 @@ RUN [ "$(id)" = "uid=1(daemon) gid=1(daemon) groups=1(daemon)" ]
 }
 
 func testCopyChown(t *testing.T, sb integration.Sandbox) {
+	// This test should work on Windows, but requires a proper image, and we will need
+	// to check SIDs instead of UIDs.
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3060,6 +3156,7 @@ COPY --from=base /out /
 }
 
 func testCopyChmod(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3119,6 +3216,7 @@ COPY --from=base /out /
 }
 
 func testCopyOverrideFiles(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3171,6 +3269,7 @@ COPY files dest
 }
 
 func testCopyVarSubstitution(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3211,6 +3310,7 @@ COPY $FOO baz
 }
 
 func testCopyWildcards(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3299,6 +3399,7 @@ COPY sub/dir1 subdest6
 }
 
 func testCopyRelative(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3345,6 +3446,7 @@ RUN sh -c "[ $(cat /test5/foo) = 'hello' ]"
 }
 
 func testAddURLChmod(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -3401,6 +3503,7 @@ COPY --from=build /dest /dest
 }
 
 func testDockerfileFromGit(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	gitDir := t.TempDir()
@@ -3495,6 +3598,7 @@ COPY --from=build foo bar2
 }
 
 func testDockerfileFromHTTP(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	buf := bytes.NewBuffer(nil)
@@ -3556,6 +3660,7 @@ COPY foo bar
 }
 
 func testMultiStageImplicitFrom(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3628,6 +3733,7 @@ COPY --from=golang /usr/bin/go go
 }
 
 func testMultiStageCaseInsensitive(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3673,6 +3779,7 @@ COPY --from=stage1 baz bax
 }
 
 func testLabels(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureImageExporter)
 	f := getFrontend(t, sb)
 
@@ -3744,6 +3851,7 @@ LABEL foo=bar
 
 // #2008
 func testWildcardRenameCache(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3783,6 +3891,7 @@ RUN ls /files/file1
 }
 
 func testOnBuildCleared(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	f := getFrontend(t, sb)
 
@@ -3885,6 +3994,7 @@ ONBUILD RUN mkdir -p /out && echo -n 11 >> /out/foo
 }
 
 func testCacheMultiPlatformImportExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureDirectPush,
 		workers.FeatureCacheExport,
@@ -4012,6 +4122,7 @@ COPY --from=base arch /
 }
 
 func testImageManifestCacheImportExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureCacheExport, workers.FeatureCacheBackendLocal)
 	f := getFrontend(t, sb)
 
@@ -4114,6 +4225,7 @@ COPY --from=base unique /
 	require.Equal(t, string(dt), string(dt2))
 }
 func testCacheImportExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureCacheExport, workers.FeatureCacheBackendLocal)
 	f := getFrontend(t, sb)
 
@@ -4205,6 +4317,7 @@ COPY --from=base unique /
 }
 
 func testReproducibleIDs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureImageExporter)
 	f := getFrontend(t, sb)
 
@@ -4270,6 +4383,7 @@ RUN echo bar > bar
 }
 
 func testImportExportReproducibleIDs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	cdAddress := sb.ContainerdAddress()
 	if cdAddress == "" {
 		t.Skip("test requires containerd worker")
@@ -4356,6 +4470,7 @@ RUN echo bar > bar
 }
 
 func testNoCache(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -4437,6 +4552,7 @@ COPY --from=s1 unique2 /
 }
 
 func testPlatformArgsImplicit(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(fmt.Sprintf(`
@@ -4485,6 +4601,7 @@ COPY foo2 bar2
 }
 
 func testPlatformArgsExplicit(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -4537,6 +4654,7 @@ COPY --from=build out .
 }
 
 func testBuiltinArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -4641,6 +4759,7 @@ COPY --from=build /out /
 }
 
 func testTarContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -4690,6 +4809,7 @@ COPY foo /
 }
 
 func testTarContextExternalDockerfile(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	foo := []byte("contents")
@@ -4752,6 +4872,7 @@ COPY foo bar
 }
 
 func testFrontendUseForwardedSolveResults(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	c, err := client.New(sb.Context(), sb.Address())
 	require.NoError(t, err)
 	defer c.Close()
@@ -4819,7 +4940,49 @@ COPY foo foo2
 	require.Equal(t, dt, []byte("data"))
 }
 
+func testFrontendEvaluate(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
+	c, err := client.New(sb.Context(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	dockerfile := []byte(`
+FROM scratch
+COPY badfile /
+`)
+	dir := integration.Tmpdir(t, fstest.CreateFile("Dockerfile", dockerfile, 0600))
+
+	frontend := func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		_, err := c.Solve(ctx, gateway.SolveRequest{
+			Frontend: "dockerfile.v0",
+			Evaluate: true,
+		})
+		require.ErrorContains(t, err, `"/badfile": not found`)
+
+		_, err = c.Solve(ctx, gateway.SolveRequest{
+			Frontend: "dockerfile.v0",
+			FrontendOpt: map[string]string{
+				"platform": "linux/amd64,linux/arm64",
+			},
+			Evaluate: true,
+		})
+		require.ErrorContains(t, err, `"/badfile": not found`)
+
+		return nil, nil
+	}
+
+	_, err = c.Build(sb.Context(), client.SolveOpt{
+		Exports: []client.ExportEntry{},
+		LocalDirs: map[string]string{
+			dockerui.DefaultLocalNameDockerfile: dir,
+			dockerui.DefaultLocalNameContext:    dir,
+		},
+	}, "", frontend, nil)
+	require.NoError(t, err)
+}
+
 func testFrontendInputs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	c, err := client.New(sb.Context(), sb.Address())
@@ -4880,6 +5043,7 @@ COPY foo foo2
 }
 
 func testFrontendSubrequests(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	if _, ok := f.(*clientFrontend); !ok {
 		t.Skip("only test with client frontend")
@@ -4959,6 +5123,7 @@ COPY Dockerfile Dockerfile
 
 // moby/buildkit#1301
 func testDockefileCheckHostname(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	dockerfile := []byte(`
 FROM busybox
@@ -5016,6 +5181,7 @@ RUN echo $(hostname) | grep foo
 }
 
 func testShmSize(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	dockerfile := []byte(`
 FROM busybox AS base
@@ -5058,6 +5224,7 @@ COPY --from=base /shmsize /
 }
 
 func testUlimit(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	dockerfile := []byte(`
 FROM busybox AS base
@@ -5100,6 +5267,7 @@ COPY --from=base /ulimit /
 }
 
 func testCgroupParent(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	if sb.Rootless() {
 		t.SkipNow()
 	}
@@ -5168,6 +5336,7 @@ COPY --from=base /out /
 }
 
 func testNamedImageContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -5301,6 +5470,7 @@ COPY --from=base /env_foobar /
 }
 
 func testNamedImageContextPlatform(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	ctx := sb.Context()
 
@@ -5373,6 +5543,7 @@ RUN echo hello
 }
 
 func testNamedImageContextTimestamps(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	ctx := sb.Context()
 
@@ -5458,6 +5629,7 @@ RUN echo foo >> /test
 }
 
 func testNamedImageContextScratch(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -5508,6 +5680,7 @@ EOF
 }
 
 func testNamedLocalContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -5567,6 +5740,7 @@ COPY --from=base /o* /
 }
 
 func testNamedOCILayoutContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureOCILayout)
 	// how this test works:
 	// 1- we use a regular builder with a dockerfile to create an image two files: "out" with content "first", "out2" with content "second"
@@ -5703,6 +5877,7 @@ COPY --from=imported /test/outfoo /
 }
 
 func testNamedOCILayoutContextExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureOCILayout)
 	ctx := sb.Context()
 
@@ -5813,6 +5988,7 @@ FROM nonexistent AS base
 }
 
 func testNamedInputContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -5920,6 +6096,7 @@ COPY --from=build /foo /out /
 }
 
 func testNamedMultiplatformInputContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureMultiPlatform)
 	ctx := sb.Context()
 
@@ -6065,7 +6242,117 @@ COPY --from=build /foo /out /
 	require.Equal(t, "foo is bar-arm64\n", string(dt))
 }
 
+func testNamedFilteredContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
+	ctx := sb.Context()
+
+	c, err := client.New(ctx, sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	fooDir := integration.Tmpdir(t,
+		// small file
+		fstest.CreateFile("foo", []byte(`foo`), 0600),
+		// blank file that's just large
+		fstest.CreateFile("bar", make([]byte, 4096*1000), 0600),
+	)
+
+	f := getFrontend(t, sb)
+
+	runTest := func(t *testing.T, dockerfile []byte, target string, min, max int64) {
+		t.Run(target, func(t *testing.T) {
+			dir := integration.Tmpdir(
+				t,
+				fstest.CreateFile(dockerui.DefaultDockerfileName, dockerfile, 0600),
+			)
+
+			ch := make(chan *client.SolveStatus)
+
+			eg, ctx := errgroup.WithContext(sb.Context())
+			eg.Go(func() error {
+				_, err := f.Solve(ctx, c, client.SolveOpt{
+					FrontendAttrs: map[string]string{
+						"context:foo": "local:foo",
+						"target":      target,
+					},
+					LocalDirs: map[string]string{
+						dockerui.DefaultLocalNameDockerfile: dir,
+						dockerui.DefaultLocalNameContext:    dir,
+						"foo":                               fooDir,
+					},
+				}, ch)
+				return err
+			})
+
+			eg.Go(func() error {
+				transferred := make(map[string]int64)
+				re := regexp.MustCompile(`transferring (.+):`)
+				for ss := range ch {
+					for _, status := range ss.Statuses {
+						m := re.FindStringSubmatch(status.ID)
+						if m == nil {
+							continue
+						}
+
+						ctxName := m[1]
+						transferred[ctxName] = status.Current
+					}
+				}
+
+				if foo := transferred["foo"]; foo < min {
+					return errors.Errorf("not enough data was transferred, %d < %d", foo, min)
+				} else if foo > max {
+					return errors.Errorf("too much data was transferred, %d > %d", foo, max)
+				}
+				return nil
+			})
+
+			err := eg.Wait()
+			require.NoError(t, err)
+		})
+	}
+
+	dockerfileBase := []byte(`
+FROM scratch AS copy_from
+COPY --from=foo /foo /
+
+FROM alpine AS run_mount
+RUN --mount=from=foo,src=/foo,target=/in/foo cp /in/foo /foo
+
+FROM foo AS image_source
+COPY --from=alpine / /
+RUN cat /foo > /bar
+
+FROM scratch AS all
+COPY --link --from=copy_from /foo /foo.b
+COPY --link --from=run_mount /foo /foo.c
+COPY --link --from=image_source /bar /foo.d
+`)
+
+	t.Run("new", func(t *testing.T) {
+		runTest(t, dockerfileBase, "run_mount", 1, 1024)
+		runTest(t, dockerfileBase, "copy_from", 1, 1024)
+		runTest(t, dockerfileBase, "image_source", 4096*1000, math.MaxInt64)
+		runTest(t, dockerfileBase, "all", 4096*1000, math.MaxInt64)
+	})
+
+	dockerfileFull := append([]byte(`
+FROM scratch AS foo
+COPY <<EOF /foo
+test
+EOF
+`), dockerfileBase...)
+
+	t.Run("replace", func(t *testing.T) {
+		runTest(t, dockerfileFull, "run_mount", 1, 1024)
+		runTest(t, dockerfileFull, "copy_from", 1, 1024)
+		runTest(t, dockerfileFull, "image_source", 4096*1000, math.MaxInt64)
+		runTest(t, dockerfileFull, "all", 4096*1000, math.MaxInt64)
+	})
+}
+
 func testSourceDateEpochWithoutExporter(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureSourceDateEpoch)
 	f := getFrontend(t, sb)
 
@@ -6140,6 +6427,7 @@ COPY Dockerfile .
 }
 
 func testSBOMScannerImage(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureSBOM)
 	ctx := sb.Context()
 
@@ -6244,6 +6532,7 @@ EOF
 }
 
 func testSBOMScannerArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureSBOM)
 	ctx := sb.Context()
 
@@ -6472,6 +6761,7 @@ ARG BUILDKIT_SBOM_SCAN_STAGE=true
 
 // #3495
 func testMultiPlatformWarnings(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	// empty line in here is intentional to cause line continuation warning
@@ -6545,6 +6835,7 @@ COPY Dockerfile \
 }
 
 func testReproSourceDateEpoch(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureSourceDateEpoch)
 	if sb.Snapshotter() == "native" {
 		t.Skip("the digest is not reproducible with the \"native\" snapshotter because hardlinks are processed in a different way: https://github.com/moby/buildkit/pull/3456#discussion_r1062650263")
@@ -6681,6 +6972,7 @@ func testNilContextInSolveGateway(t *testing.T, sb integration.Sandbox) {
 }
 
 func testCopyUnicodePath(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	c, err := client.New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -6985,7 +7277,7 @@ func (*networkModeSandbox) UpdateConfigFile(in string) string {
 var networkHostGranted integration.ConfigUpdater = &networkModeHost{}
 var networkHostDenied integration.ConfigUpdater = &networkModeSandbox{}
 
-func fixedWriteCloser(wc io.WriteCloser) func(map[string]string) (io.WriteCloser, error) {
+func fixedWriteCloser(wc io.WriteCloser) filesync.FileOutputFunc {
 	return func(map[string]string) (io.WriteCloser, error) {
 		return wc, nil
 	}
