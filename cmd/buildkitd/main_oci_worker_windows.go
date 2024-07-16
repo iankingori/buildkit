@@ -25,7 +25,7 @@ import (
 	"github.com/moby/buildkit/util/network/netproviders"
 	"github.com/moby/buildkit/worker"
 	"github.com/moby/buildkit/worker/base"
-	"github.com/moby/buildkit/worker/runc"
+	"github.com/moby/buildkit/worker/runhcs"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 	"golang.org/x/sync/semaphore"
@@ -89,7 +89,7 @@ func ociWorkerInitializer(c *cli.Context, common workerInitializerOpt) ([]worker
 		parallelismSem = semaphore.NewWeighted(int64(cfg.MaxParallelism))
 	}
 
-	opt, err := runc.NewWorkerOpt(common.config.Root, snFactory, cfg.Rootless, processMode, cfg.Labels, idmapping, nc, dns, cfg.Binary, cfg.ApparmorProfile, cfg.SELinux, parallelismSem, common.traceSocket, cfg.DefaultCgroupParent)
+	opt, err := runhcs.NewWorkerOpt(common.config.Root, snFactory, cfg.Rootless, processMode, cfg.Labels, idmapping, nc, dns, cfg.Binary, cfg.ApparmorProfile, cfg.SELinux, parallelismSem, common.traceSocket, cfg.DefaultCgroupParent)
 	if err != nil {
 		return nil, err
 	}
@@ -111,17 +111,17 @@ func ociWorkerInitializer(c *cli.Context, common workerInitializerOpt) ([]worker
 	return []worker.Worker{w}, nil
 }
 
-func snapshotterFactory(commonRoot string, cfg config.OCIConfig, sm *session.Manager, hosts docker.RegistryHosts) (runc.SnapshotterFactory, error) {
+func snapshotterFactory(commonRoot string, cfg config.OCIConfig, sm *session.Manager, hosts docker.RegistryHosts) (runhcs.SnapshotterFactory, error) {
 	var (
 		name    = cfg.Snapshotter
 		address = cfg.ProxySnapshotterPath
 	)
 	if address != "" {
-		snFactory := runc.SnapshotterFactory{
+		snFactory := runhcs.SnapshotterFactory{
 			Name: name,
 		}
 		if _, err := os.Stat(address); os.IsNotExist(err) {
-			return snFactory, errors.Wrapf(err, "snapshotter doesn't exist on %q (Do not include 'unix://' prefix)", address)
+			return snFactory, errors.Wrapf(err, "snapshotter doesn't exist on %q (Do not include 'npipe://' prefix)", address)
 		}
 		snFactory.New = func(root string) (ctdsnapshot.Snapshotter, error) {
 			backoffConfig := backoff.DefaultConfig
@@ -149,7 +149,7 @@ func snapshotterFactory(commonRoot string, cfg config.OCIConfig, sm *session.Man
 		name = "windows"
 	}
 
-	snFactory := runc.SnapshotterFactory{
+	snFactory := runhcs.SnapshotterFactory{
 		Name: name,
 	}
 
@@ -166,7 +166,7 @@ func validOCIBinary() bool {
 	_, err := exec.LookPath("runhcs")
 	_, err1 := exec.LookPath("buildkit-runhcs")
 	if err != nil && err1 != nil {
-		bklog.L.Warnf("skipping oci worker, as runc does not exist")
+		bklog.L.Warnf("skipping oci worker, as runhcs does not exist")
 		return false
 	}
 	return true

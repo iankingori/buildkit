@@ -45,6 +45,15 @@ func WithProcessCommandLine(cmdLine string) SpecOpts {
 	}
 }
 
+// WithWindowsLayerFolders adds scratch and bundle paths to Windows Layer Folders - runhcs
+func WithWindowsLayerFolders(scratchLayerPath string, bundleFolderPath string) SpecOpts {
+	return func(_ context.Context, _ Client, _ *containers.Container, s *Spec) error {
+		s.Windows.LayerFolders = append(s.Windows.LayerFolders, scratchLayerPath+"\\")
+		s.Windows.LayerFolders = append(s.Windows.LayerFolders, bundleFolderPath+"\\")
+		return nil
+	}
+}
+
 // WithHostDevices adds all the hosts device nodes to the container's spec
 //
 // Not supported on windows

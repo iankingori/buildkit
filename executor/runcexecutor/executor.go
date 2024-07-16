@@ -59,7 +59,7 @@ type Opt struct {
 	ResourceMonitor *resources.Monitor
 }
 
-var defaultCommandCandidates = []string{"buildkit-runc", "runc", "runhcs"}
+var defaultCommandCandidates = []string{"buildkit-runc", "runc"}
 
 type runcExecutor struct {
 	runc             *runc.Runc

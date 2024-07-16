@@ -34,14 +34,14 @@ import (
 	winfs "github.com/Microsoft/go-winio/pkg/fs"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/pkg/ociwclayer"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/storage"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -207,7 +207,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 		// If (windowsDiff).Apply was used to populate this layer, then it's already in the 'committed' state.
 		// See createSnapshot below for more details
-		if !strings.Contains(key, snapshots.UnpackKeyPrefix) {
+		if !strings.Contains(key, snapshots.UnpackKeyPrefix) || snapshot.Kind != snapshots.KindCommitted {
 			if len(snapshot.ParentIDs) == 0 {
 				if err = hcsshim.ConvertToBaseLayer(path); err != nil {
 					return err
@@ -361,7 +361,7 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			return fmt.Errorf("failed to create snapshot dir %s: %w", snDir, err)
 		}
 
-		if strings.Contains(key, snapshots.UnpackKeyPrefix) {
+		if strings.Contains(key, snapshots.UnpackKeyPrefix) && parent != "" {
 			// IO/disk space optimization: Do nothing
 			//
 			// We only need one sandbox.vhdx for the container. Skip making one for this

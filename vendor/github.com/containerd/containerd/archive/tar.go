@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -392,7 +393,7 @@ func createTarFile(ctx context.Context, path, extractDir string, hdr *tar.Header
 		return fmt.Errorf("unhandled tar header type %d", hdr.Typeflag)
 	}
 
-	if !noSameOwner {
+	if !noSameOwner && runtime.GOOS != "windows" {
 		if err := os.Lchown(path, hdr.Uid, hdr.Gid); err != nil {
 			err = fmt.Errorf("failed to Lchown %q for UID %d, GID %d: %w", path, hdr.Uid, hdr.Gid, err)
 			if errors.Is(err, syscall.EINVAL) && userns.RunningInUserNS() {
