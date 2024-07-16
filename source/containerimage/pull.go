@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
-	"runtime"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -230,7 +229,8 @@ func (p *puller) Snapshot(ctx context.Context, g session.Group) (ir cache.Immuta
 	}()
 
 	var parent cache.ImmutableRef
-	setWindowsLayerType := p.Platform.OS == "windows" && runtime.GOOS != "windows"
+	// (ian) TODO: Investigate why
+	setWindowsLayerType := p.Platform.OS == "windows"
 	for _, layerDesc := range p.manifest.Descriptors {
 		parent = current
 		current, err = p.CacheAccessor.GetByBlob(ctx, layerDesc, parent,

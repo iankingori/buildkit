@@ -51,7 +51,7 @@ func ensureHive(path string, root *os.File) (err error) {
 	}()
 
 	err = winapi.ORSaveHive(key, fullPath, version.MajorVersion, version.MinorVersion)
-	if err != nil {
+	if err != nil { // && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("saving hive: %w", err)
 	}
 

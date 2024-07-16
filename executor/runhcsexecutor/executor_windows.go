@@ -1,0 +1,73 @@
+package runhcsexecutor
+
+import (
+	"context"
+
+	runc "github.com/containerd/go-runc"
+	"github.com/moby/buildkit/executor"
+	"github.com/moby/buildkit/util/bklog"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
+)
+
+func (w *runhcsExecutor) run(ctx context.Context, id, bundle string, process executor.ProcessInfo, started func(), keep bool) error {
+	killer := newRunProcKiller(w.runc, id)
+	return w.callWithIO(ctx, process, started, killer, func(ctx context.Context, started chan<- int, io runc.IO, pidfile string) error {
+		extraArgs := []string{}
+		if keep {
+			extraArgs = append(extraArgs, "--keep")
+		}
+		_, err := w.runc.Run(ctx, id, bundle, &runc.CreateOpts{
+			NoPivot:   w.noPivot,
+			Started:   started,
+			IO:        io,
+			ExtraArgs: extraArgs,
+		})
+		return err
+	})
+}
+
+func (w *runhcsExecutor) exec(ctx context.Context, id string, specsProcess *specs.Process, process executor.ProcessInfo, started func()) error {
+	killer, err := newExecProcKiller(w.runc, id)
+	if err != nil {
+		return errors.Wrap(err, "failed to initialize process killer")
+	}
+	defer killer.Cleanup()
+
+	return w.callWithIO(ctx, process, started, killer, func(ctx context.Context, started chan<- int, io runc.IO, pidfile string) error {
+		return w.runc.Exec(ctx, id, *specsProcess, &runc.ExecOpts{
+			Started: started,
+			IO:      io,
+			PidFile: pidfile,
+		})
+	})
+}
+
+type runcCall func(ctx context.Context, started chan<- int, io runc.IO, pidfile string) error
+
+func (w *runhcsExecutor) callWithIO(ctx context.Context, process executor.ProcessInfo, started func(), killer procKiller, call runcCall) error {
+	runcProcess, ctx := runcProcessHandle(ctx, killer)
+	defer runcProcess.Release()
+
+	eg, ctx := errgroup.WithContext(ctx)
+	defer func() {
+		if err := eg.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			bklog.G(ctx).Errorf("runc process monitoring error: %s", err)
+		}
+	}()
+	defer runcProcess.Shutdown()
+
+	startedCh := make(chan int, 1)
+	eg.Go(func() error {
+		return runcProcess.WaitForStart(ctx, startedCh, started)
+	})
+
+	eg.Go(func() error {
+		return handleSignals(ctx, runcProcess, process.Signal)
+	})
+
+	return call(ctx, startedCh, &forwardIO{stdin: process.Stdin, stdout: process.Stdout, stderr: process.Stderr}, killer.pidfile)
+
+	// (ian)TODO: Add TTY Support
+}
