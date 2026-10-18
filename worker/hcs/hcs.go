@@ -27,16 +27,28 @@ import (
 	"github.com/moby/buildkit/worker/base"
 	wlabel "github.com/moby/buildkit/worker/label"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sync/semaphore"
 )
 
-// snapshotterName is the containerd snapshotter name for Windows layers.
-const snapshotterName = "windows"
+// Snapshotter names. "windows" keeps layers in the classic Windows layer format; "cim" stores them as
+// forked CIMs (CimFS), which makes committing a build step cheap.
+const (
+	WindowsSnapshotter = "windows"
+	CIMSnapshotter     = "cim"
+)
 
-// NewWorkerOpt creates a WorkerOpt for the daemon-less Windows worker.
-func NewWorkerOpt(root string, labels map[string]string, nopt netproviders.Opt, dns *oci.DNSConfig, binary string, parallelismSem *semaphore.Weighted, policies ...compaction.Config) (base.WorkerOpt, error) {
+// NewWorkerOpt creates a WorkerOpt for the daemon-less Windows worker. snapshotterName is
+// WindowsSnapshotter (the default) or CIMSnapshotter.
+func NewWorkerOpt(root string, labels map[string]string, nopt netproviders.Opt, dns *oci.DNSConfig, binary, snapshotterName string, parallelismSem *semaphore.Weighted, policies ...compaction.Config) (base.WorkerOpt, error) {
 	var opt base.WorkerOpt
+	if snapshotterName == "" {
+		snapshotterName = WindowsSnapshotter
+	}
+	if snapshotterName != WindowsSnapshotter && snapshotterName != CIMSnapshotter {
+		return opt, errors.Errorf("unknown snapshotter %q (use %q or %q)", snapshotterName, WindowsSnapshotter, CIMSnapshotter)
+	}
 	root = filepath.Join(root, "hcs-"+snapshotterName)
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return opt, err
@@ -56,7 +68,13 @@ func NewWorkerOpt(root string, labels map[string]string, nopt netproviders.Opt, 
 		return opt, err
 	}
 
-	s, err := windowssnapshot.NewWindowsSnapshotter(filepath.Join(root, "snapshots"))
+	var s ctdsnapshot.Snapshotter
+	switch snapshotterName {
+	case CIMSnapshotter:
+		s, err = newCIMSnapshotter(filepath.Join(root, "snapshots"))
+	default:
+		s, err = windowssnapshot.NewWindowsSnapshotter(filepath.Join(root, "snapshots"))
+	}
 	if err != nil {
 		return opt, err
 	}
@@ -84,7 +102,13 @@ func NewWorkerOpt(root string, labels map[string]string, nopt netproviders.Opt, 
 	c := containerdsnapshot.NewContentStore(mdb.ContentStore(), "buildkit")
 
 	// Windows layers are written and compared through hcsshim, so one differ serves both roles.
-	diffs, err := windowsdiff.NewWindowsDiff(c)
+	// (The CIM differ can't compare yet, so exporting layers from a CIM store isn't supported.)
+	var diffs windowsdiff.CompareApplier
+	if snapshotterName == CIMSnapshotter {
+		diffs, err = windowsdiff.NewCimDiff(c)
+	} else {
+		diffs, err = windowsdiff.NewWindowsDiff(c)
+	}
 	if err != nil {
 		return opt, err
 	}

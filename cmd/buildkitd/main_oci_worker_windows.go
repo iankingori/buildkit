@@ -63,6 +63,11 @@ func init() {
 			Usage: "path of the runhcs binary used to run build steps",
 			Value: defaultConf.Workers.OCI.Binary,
 		},
+		&cli.StringFlag{
+			Name:  "oci-worker-snapshotter",
+			Usage: "snapshotter for the oci worker: windows (default) or cim (layers stored as CimFS images)",
+			Value: "windows",
+		},
 		&cli.IntFlag{
 			Name:  "oci-max-parallelism",
 			Usage: "maximum number of parallel build steps that can be run at the same time (0 is unlimited)",
@@ -111,6 +116,9 @@ func applyOCIFlags(c *cli.Command, cfg *config.Config) error {
 	if c.IsSet("oci-worker-binary") {
 		cfg.Workers.OCI.Binary = c.String("oci-worker-binary")
 	}
+	if c.IsSet("oci-worker-snapshotter") {
+		cfg.Workers.OCI.Snapshotter = c.String("oci-worker-snapshotter")
+	}
 	if c.IsSet("oci-max-parallelism") {
 		cfg.Workers.OCI.MaxParallelism = c.Int("oci-max-parallelism")
 	}
@@ -148,7 +156,7 @@ func ociWorkerInitializer(c *cli.Command, common workerInitializerOpt) ([]worker
 		parallelismSem = semaphore.NewWeighted(int64(cfg.MaxParallelism))
 	}
 
-	opt, err := hcs.NewWorkerOpt(common.config.Root, cfg.Labels, nc, dns, cfg.Binary, parallelismSem, common.compaction...)
+	opt, err := hcs.NewWorkerOpt(common.config.Root, cfg.Labels, nc, dns, cfg.Binary, cfg.Snapshotter, parallelismSem, common.compaction...)
 	if err != nil {
 		return nil, err
 	}

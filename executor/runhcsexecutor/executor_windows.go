@@ -63,6 +63,41 @@ func New(opt Opt, networkProviders map[pb.NetMode]network.Provider) (executor.Ex
 	return &runhcsExecutor{binary: path, root: opt.Root, networkProviders: networkProviders}, nil
 }
 
+// rootfsMountAnnotation tells runhcs where the JSON description of a CIM root file system is; it is
+// the annotation runhcs reads (hcsshim feature/runhcs-cim).
+const rootfsMountAnnotation = "io.runhcs.rootfs-mount"
+
+// rootfs says how runhcs gets the container's root file system.
+type rootfs struct {
+	// scratch is the writable layer directory.
+	scratch string
+	// folders are the layer folders (parents..., scratch) of a windows-layer rootfs.
+	folders []string
+	// cimMount describes a forked CIM chain plus scratch (containerd mount JSON), empty for windows-layer.
+	cimMount []byte
+}
+
+// rootfsFromMounts understands the mounts of both Windows snapshotters.
+func rootfsFromMounts(mounts []mount.Mount) (*rootfs, error) {
+	if len(mounts) == 1 && mounts[0].Type == mount.CimFSMountType {
+		m := mounts[0]
+		js, err := json.Marshal(struct {
+			Type    string   `json:"type"`
+			Source  string   `json:"source"`
+			Options []string `json:"options"`
+		}{m.Type, m.Source, m.Options})
+		if err != nil {
+			return nil, err
+		}
+		return &rootfs{scratch: m.Source, cimMount: js}, nil
+	}
+	folders, err := layerFolders(mounts)
+	if err != nil {
+		return nil, err
+	}
+	return &rootfs{scratch: folders[len(folders)-1], folders: folders}, nil
+}
+
 // layerFolders converts the Windows snapshotter mounts into the layer folder list that runhcs
 // expects: the parent layers (as given by the snapshotter) followed by the writable scratch layer.
 func layerFolders(mounts []mount.Mount) ([]string, error) {
@@ -117,13 +152,13 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	}
 	defer releaseRoot()
 
-	folders, err := layerFolders(rootMounts)
+	rfs, err := rootfsFromMounts(rootMounts)
 	if err != nil {
 		return nil, err
 	}
 	// Runs after the container is gone (defers are LIFO): the snapshotter can only commit the
 	// scratch layer once HCS has fully released it.
-	defer waitLayerReleased(ctx, folders[len(folders)-1])
+	defer waitLayerReleased(ctx, rfs.scratch)
 
 	namespace, err := provider.New(ctx, meta.Hostname, network.NamespaceOptions{})
 	if err != nil {
@@ -144,13 +179,23 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	// Pass the command line verbatim: an args array would make hcsshim escape embedded quotes in
 	// a way cmd.exe rejects (same approach as the containerd executor on Windows).
 	setCommandLine(spec.Process, meta.Args)
-	spec.Windows.LayerFolders = folders
+	spec.Windows.LayerFolders = rfs.folders
 
 	bundle := filepath.Join(w.root, id)
 	if err := os.MkdirAll(bundle, 0o700); err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(bundle)
+	if rfs.cimMount != nil {
+		mountFile := filepath.Join(bundle, "rootfs-mount.json")
+		if err := os.WriteFile(mountFile, rfs.cimMount, 0o600); err != nil {
+			return nil, err
+		}
+		if spec.Annotations == nil {
+			spec.Annotations = map[string]string{}
+		}
+		spec.Annotations[rootfsMountAnnotation] = mountFile
+	}
 	cfg, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err

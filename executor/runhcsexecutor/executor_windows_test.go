@@ -3,6 +3,7 @@
 package runhcsexecutor
 
 import (
+	"encoding/json"
 	"os/exec"
 	"testing"
 
@@ -36,6 +37,35 @@ func TestLayerFolders(t *testing.T) {
 	base, err := layerFolders([]mount.Mount{{Type: "windows-layer", Source: `C:\snap\1`}})
 	require.NoError(t, err)
 	require.Equal(t, []string{`C:\snap\1`}, base)
+}
+
+func TestRootfsFromMounts(t *testing.T) {
+	cim := mount.Mount{
+		Type:    mount.CimFSMountType,
+		Source:  `C:\snap\3`,
+		Options: []string{"rw", `cimpath=C:\cims\3.cim`, `parentLayerPaths=["C:\\snap\\2"]`, `parentCimPaths=["C:\\cims\\2.cim"]`},
+	}
+	got, err := rootfsFromMounts([]mount.Mount{cim})
+	require.NoError(t, err)
+	require.Equal(t, `C:\snap\3`, got.scratch)
+	require.Empty(t, got.folders)
+	// runhcs reads containerd's mount JSON (lower-case keys)
+	var m struct {
+		Type    string   `json:"type"`
+		Source  string   `json:"source"`
+		Options []string `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(got.cimMount, &m))
+	require.Equal(t, "CimFS", m.Type)
+	require.Equal(t, cim.Source, m.Source)
+	require.Equal(t, cim.Options, m.Options)
+
+	wl := mount.Mount{Type: "windows-layer", Source: `C:\snap\3`, Options: []string{"rw", `parentLayerPaths=["C:\\snap\\2"]`}}
+	got, err = rootfsFromMounts([]mount.Mount{wl})
+	require.NoError(t, err)
+	require.Nil(t, got.cimMount)
+	require.Equal(t, `C:\snap\3`, got.scratch)
+	require.Equal(t, []string{`C:\snap\2`, `C:\snap\3`}, got.folders)
 }
 
 func TestSetCommandLine(t *testing.T) {
