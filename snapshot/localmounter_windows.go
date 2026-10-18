@@ -56,10 +56,9 @@ func (lm *localMounter) Mount() (string, error) {
 		}
 	} else {
 		// see https://github.com/moby/buildkit/issues/5807
-		// if it's a race condition issue, do max 2 retries with some backoff
-		// should adjust the retries if this persists but 1 retry
-		// seems to be enough.
-		if err := mountWithRetries(m, dir, 2); err != nil {
+		// if it's a race condition issue, retry with some backoff. Concurrent mounts of sibling
+		// layers can keep a layer busy for longer than a couple of short retries.
+		if err := mountWithRetries(m, dir, 10); err != nil {
 			return "", errors.Wrapf(err, "failed to mount %v", m)
 		}
 	}
@@ -70,7 +69,7 @@ func (lm *localMounter) Mount() (string, error) {
 
 func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	errStr := "cannot access the file because it is being used by another process"
-	backoff := 30 * time.Millisecond
+	backoff := 100 * time.Millisecond
 	var err error
 
 	for i := range retries + 1 {
