@@ -86,13 +86,19 @@ github.com/Microsoft/go-winio/internal/fs
 github.com/Microsoft/go-winio/internal/socket
 github.com/Microsoft/go-winio/internal/stringbuffer
 github.com/Microsoft/go-winio/pkg/bindfilter
+github.com/Microsoft/go-winio/pkg/fs
 github.com/Microsoft/go-winio/pkg/guid
+github.com/Microsoft/go-winio/pkg/security
 github.com/Microsoft/go-winio/vhd
 # github.com/Microsoft/hcsshim v0.15.0-rc.4
 ## explicit; go 1.26.3
 github.com/Microsoft/hcsshim
 github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options
 github.com/Microsoft/hcsshim/computestorage
+github.com/Microsoft/hcsshim/ext4/dmverity
+github.com/Microsoft/hcsshim/ext4/internal/compactext4
+github.com/Microsoft/hcsshim/ext4/internal/format
+github.com/Microsoft/hcsshim/ext4/tar2ext4
 github.com/Microsoft/hcsshim/hcn
 github.com/Microsoft/hcsshim/internal/cni
 github.com/Microsoft/hcsshim/internal/cow
@@ -118,12 +124,16 @@ github.com/Microsoft/hcsshim/internal/security
 github.com/Microsoft/hcsshim/internal/timeout
 github.com/Microsoft/hcsshim/internal/vmcompute
 github.com/Microsoft/hcsshim/internal/wclayer
+github.com/Microsoft/hcsshim/internal/wclayer/cim
 github.com/Microsoft/hcsshim/internal/winapi
 github.com/Microsoft/hcsshim/internal/winapi/cimfs
 github.com/Microsoft/hcsshim/internal/winapi/cimwriter
 github.com/Microsoft/hcsshim/internal/winapi/types
 github.com/Microsoft/hcsshim/osversion
+github.com/Microsoft/hcsshim/pkg/cimfs
+github.com/Microsoft/hcsshim/pkg/cimfs/format
 github.com/Microsoft/hcsshim/pkg/ociwclayer
+github.com/Microsoft/hcsshim/pkg/ociwclayer/cim
 # github.com/ProtonMail/go-crypto v1.4.1
 ## explicit; go 1.23.0
 github.com/ProtonMail/go-crypto/bitcurves
@@ -431,11 +441,13 @@ github.com/containerd/containerd/v2/pkg/tracing
 github.com/containerd/containerd/v2/plugins
 github.com/containerd/containerd/v2/plugins/content/local
 github.com/containerd/containerd/v2/plugins/diff/walking
+github.com/containerd/containerd/v2/plugins/diff/windows
 github.com/containerd/containerd/v2/plugins/services
 github.com/containerd/containerd/v2/plugins/services/content/contentserver
 github.com/containerd/containerd/v2/plugins/snapshots/native
 github.com/containerd/containerd/v2/plugins/snapshots/overlay
 github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils
+github.com/containerd/containerd/v2/plugins/snapshots/windows
 github.com/containerd/containerd/v2/version
 # github.com/containerd/continuity v0.5.0
 ## explicit; go 1.21
@@ -486,6 +498,7 @@ github.com/containerd/platforms
 # github.com/containerd/plugin v1.1.0
 ## explicit; go 1.22
 github.com/containerd/plugin
+github.com/containerd/plugin/registry
 # github.com/containerd/stargz-snapshotter v0.18.2
 ## explicit; go 1.25.0
 github.com/containerd/stargz-snapshotter/cache
