@@ -7,6 +7,7 @@ package runhcsexecutor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,6 +126,8 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 		// ExecOp doesn't name its containers; same approach as runcexecutor.
 		id = identity.NewID()
 	}
+	ph := newPhases()
+	defer func() { ph.log(ctx, id) }()
 	if meta.Tty {
 		return nil, errors.New("runhcs executor: tty is not supported yet")
 	}
@@ -142,6 +145,7 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	})
 	defer startedOnce()
 
+	ph.mark("start")
 	mountable, err := root.Src.Mount(ctx, false)
 	if err != nil {
 		return nil, err
@@ -158,12 +162,17 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	}
 	// Runs after the container is gone (defers are LIFO): the snapshotter can only commit the
 	// scratch layer once HCS has fully released it.
-	defer waitLayerReleased(ctx, rfs.scratch)
+	defer func() {
+		waitLayerReleased(ctx, rfs.scratch)
+		ph.mark("scratch released")
+	}()
 
+	ph.mark("rootfs mounts")
 	namespace, err := provider.New(ctx, meta.Hostname, network.NamespaceOptions{})
 	if err != nil {
 		return nil, err
 	}
+	ph.mark("network namespace")
 	defer namespace.Close()
 
 	spec, cleanupSpec, err := oci.GenerateSpec(ctx, meta, mounts, id, "", "", namespace, "", oci.ProcessSandbox, nil, "", false, "", nil, containerdoci.WithUser(meta.User))
@@ -171,6 +180,7 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 		return nil, err
 	}
 	defer cleanupSpec()
+	ph.mark("generate spec")
 	if spec.Windows == nil {
 		spec.Windows = &specs.Windows{}
 	}
@@ -224,9 +234,11 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	// the container is done; forget also removes any state left behind by an abnormal exit.
 	defer w.forget(id)
 
+	ph.mark("write bundle")
 	if err := cmd.Start(); err != nil {
 		return nil, errors.Wrap(err, "failed to start runhcs")
 	}
+	ph.mark("runhcs spawned")
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -236,10 +248,12 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	for {
 		select {
 		case err := <-done:
+			ph.mark("runhcs run returned")
 			startedOnce()
 			return nil, exitError(err, meta.ValidExitCodes)
 		case <-ticker.C:
 			if _, err := os.Stat(pidFile); err == nil {
+				ph.mark("container started (pid file)")
 				startedOnce()
 				ticker.Stop()
 			}
@@ -358,4 +372,23 @@ func exitError(err error, validExitCodes []int) error {
 		return nil
 	}
 	return exitErr
+}
+
+// phases records when each stage of starting and stopping a container was reached, for debug logs.
+type phases struct {
+	t0    time.Time
+	last  time.Time
+	items []string
+}
+
+func newPhases() *phases { now := time.Now(); return &phases{t0: now, last: now} }
+
+func (p *phases) mark(name string) {
+	now := time.Now()
+	p.items = append(p.items, fmt.Sprintf("%s +%dms", name, now.Sub(p.last).Milliseconds()))
+	p.last = now
+}
+
+func (p *phases) log(ctx context.Context, id string) {
+	bklog.G(ctx).Debugf("runhcs executor phases for %s (total %dms): %s", id, time.Since(p.t0).Milliseconds(), strings.Join(p.items, ", "))
 }
