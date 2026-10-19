@@ -2,10 +2,13 @@
 
 package contenthash
 
-import "path/filepath"
+import (
+	"io/fs"
+	"path/filepath"
+)
 
-func (cc *cacheContext) walk(scanPath string, walkFunc filepath.WalkFunc) error {
-	return filepath.Walk(scanPath, walkFunc)
+func (cc *cacheContext) walk(scanPath string, walkFunc fs.WalkDirFunc) error {
+	return filepath.WalkDir(scanPath, walkFunc)
 }
 
 // This is a no-op on non-Windows
