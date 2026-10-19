@@ -63,6 +63,11 @@ func init() {
 			Usage: "path of the runhcs binary used to run build steps",
 			Value: defaultConf.Workers.OCI.Binary,
 		},
+		&cli.BoolFlag{
+			Name:  "oci-worker-gc",
+			Usage: "enable cache garbage collection for the oci worker (default true; the default policy keeps 20% of the disk free)",
+			Value: true,
+		},
 		&cli.StringFlag{
 			Name:  "oci-worker-snapshotter",
 			Usage: "snapshotter for the oci worker: windows (default) or cim (layers stored as CimFS images)",
@@ -115,6 +120,10 @@ func applyOCIFlags(c *cli.Command, cfg *config.Config) error {
 	}
 	if c.IsSet("oci-worker-binary") {
 		cfg.Workers.OCI.Binary = c.String("oci-worker-binary")
+	}
+	if c.IsSet("oci-worker-gc") {
+		v := c.Bool("oci-worker-gc")
+		cfg.Workers.OCI.GC = &v
 	}
 	if c.IsSet("oci-worker-snapshotter") {
 		cfg.Workers.OCI.Snapshotter = c.String("oci-worker-snapshotter")
