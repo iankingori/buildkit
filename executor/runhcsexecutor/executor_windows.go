@@ -40,9 +40,15 @@ type Opt struct {
 	// Binary is the runhcs binary to use. If empty, "runhcs" is looked up in PATH.
 	Binary string
 	DNS    *oci.DNSConfig
+	// GracefulShutdown asks a build step's container to shut down gracefully after its process has
+	// exited. By default the container is terminated right away: nothing in it needs a clean
+	// shutdown (file and registry changes are kept), and the graceful shutdown stalls for ~25-30s
+	// in about a fifth of the containers.
+	GracefulShutdown bool
 }
 
 type runhcsExecutor struct {
+	gracefulShutdown bool
 	binary           string
 	root             string
 	networkProviders map[pb.NetMode]network.Provider
@@ -61,7 +67,10 @@ func New(opt Opt, networkProviders map[pb.NetMode]network.Provider) (executor.Ex
 	if err := os.MkdirAll(opt.Root, 0o700); err != nil {
 		return nil, err
 	}
-	w := &runhcsExecutor{binary: path, root: opt.Root, networkProviders: networkProviders}
+	if os.Getenv("BUILDKIT_RUNHCS_GRACEFUL_SHUTDOWN") == "1" {
+		opt.GracefulShutdown = true
+	}
+	w := &runhcsExecutor{binary: path, root: opt.Root, networkProviders: networkProviders, gracefulShutdown: opt.GracefulShutdown}
 	w.recoverStale(context.Background())
 	return w, nil
 }
@@ -98,6 +107,9 @@ func (w *runhcsExecutor) recoverStale(ctx context.Context) {
 // state of the containers this executor starts. It is separate from runhcs' default so that
 // recovering after a crash only ever touches containers that this executor created.
 const runhcsRoot = "buildkit"
+
+// terminateOnExitAnnotation tells the runhcs shim to terminate the container when its process exits.
+const terminateOnExitAnnotation = "io.runhcs.terminate-on-exit"
 
 // rootfsMountAnnotation tells runhcs where the JSON description of a CIM root file system is; it is
 // the annotation runhcs reads (hcsshim feature/runhcs-cim).
@@ -225,6 +237,12 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	// a way cmd.exe rejects (same approach as the containerd executor on Windows).
 	setCommandLine(spec.Process, meta.Args)
 	spec.Windows.LayerFolders = rfs.folders
+	if !w.gracefulShutdown {
+		if spec.Annotations == nil {
+			spec.Annotations = map[string]string{}
+		}
+		spec.Annotations[terminateOnExitAnnotation] = "true"
+	}
 
 	bundle := filepath.Join(w.root, id)
 	if err := os.MkdirAll(bundle, 0o700); err != nil {
