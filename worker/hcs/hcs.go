@@ -68,6 +68,9 @@ func NewWorkerOpt(root string, labels map[string]string, nopt netproviders.Opt, 
 		return opt, err
 	}
 
+	if err := removeOrphanSnapshots(context.TODO(), filepath.Join(root, "snapshots")); err != nil {
+		return opt, err
+	}
 	var s ctdsnapshot.Snapshotter
 	switch snapshotterName {
 	case CIMSnapshotter:

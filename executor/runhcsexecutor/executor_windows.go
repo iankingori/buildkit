@@ -61,8 +61,43 @@ func New(opt Opt, networkProviders map[pb.NetMode]network.Provider) (executor.Ex
 	if err := os.MkdirAll(opt.Root, 0o700); err != nil {
 		return nil, err
 	}
-	return &runhcsExecutor{binary: path, root: opt.Root, networkProviders: networkProviders}, nil
+	w := &runhcsExecutor{binary: path, root: opt.Root, networkProviders: networkProviders}
+	w.recoverStale(context.Background())
+	return w, nil
 }
+
+// recoverStale removes what a previous run of the worker left behind if it died while build steps
+// were running: containers (and with them their mounted layers), bundle directories and old logs.
+// Nothing is running yet when the executor is created, so everything in its state is stale.
+func (w *runhcsExecutor) recoverStale(ctx context.Context) {
+	out, err := exec.Command(w.binary, "--root", runhcsRoot, "list", "-q").Output()
+	if err != nil {
+		bklog.G(ctx).WithError(err).Debug("runhcs list failed, skipping stale container recovery")
+	}
+	for _, id := range strings.Fields(string(out)) {
+		start := time.Now()
+		w.forceDelete(id)
+		w.forget(id)
+		bklog.G(ctx).Infof("removed stale runhcs container %s left by a previous run (%s)", id, time.Since(start).Round(time.Millisecond))
+	}
+	entries, err := os.ReadDir(w.root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		p := filepath.Join(w.root, e.Name())
+		if e.IsDir() {
+			os.RemoveAll(p)
+		} else if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > 24*time.Hour {
+			os.Remove(p)
+		}
+	}
+}
+
+// runhcsRoot is the registry key (below HKLM\Software\Microsoft\runhcs) in which runhcs keeps the
+// state of the containers this executor starts. It is separate from runhcs' default so that
+// recovering after a crash only ever touches containers that this executor created.
+const runhcsRoot = "buildkit"
 
 // rootfsMountAnnotation tells runhcs where the JSON description of a CIM root file system is; it is
 // the annotation runhcs reads (hcsshim feature/runhcs-cim).
@@ -216,7 +251,7 @@ func (w *runhcsExecutor) Run(ctx context.Context, id string, root executor.Mount
 	}
 
 	pidFile := filepath.Join(bundle, "pid")
-	args := []string{}
+	args := []string{"--root", runhcsRoot}
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		// Keep runhcs' own log: it ignores errors while releasing layers after exit, so the log is
 		// the only place they show up.
@@ -296,7 +331,7 @@ func (w *runhcsExecutor) Exec(ctx context.Context, id string, process executor.P
 	if err := os.WriteFile(pfile, pj, 0o600); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, w.binary, "exec", "-p", pfile, id)
+	cmd := exec.CommandContext(ctx, w.binary, "--root", runhcsRoot, "exec", "-p", pfile, id)
 	cmd.Stdin = process.Stdin
 	cmd.Stdout = process.Stdout
 	cmd.Stderr = process.Stderr
@@ -338,7 +373,7 @@ func setCommandLine(p *specs.Process, args []string) {
 
 // forceDelete terminates the container and removes its runhcs state.
 func (w *runhcsExecutor) forceDelete(id string) {
-	out, err := exec.Command(w.binary, "delete", "-f", id).CombinedOutput()
+	out, err := exec.Command(w.binary, "--root", runhcsRoot, "delete", "-f", id).CombinedOutput()
 	if err != nil {
 		bklog.L.Debugf("runhcs delete -f %s: %v: %s", id, err, strings.TrimSpace(string(out)))
 	}
@@ -347,7 +382,7 @@ func (w *runhcsExecutor) forceDelete(id string) {
 // forget removes runhcs' registry state for the container. runhcs leaves it behind when the
 // compute system disappears on its own, and `delete -f` then fails to clear it.
 func (w *runhcsExecutor) forget(id string) {
-	err := registry.DeleteKey(registry.LOCAL_MACHINE, `Software\Microsoft\runhcs\default\`+id)
+	err := registry.DeleteKey(registry.LOCAL_MACHINE, `Software\Microsoft\runhcs\`+runhcsRoot+`\`+id)
 	if err != nil && !errors.Is(err, registry.ErrNotExist) {
 		bklog.L.Debugf("removing runhcs state for %s: %v", id, err)
 	}
