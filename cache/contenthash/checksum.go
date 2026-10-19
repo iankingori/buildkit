@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -1066,7 +1067,10 @@ func (cc *cacheContext) scanPath(ctx context.Context, m *mount, p string, follow
 		scanPath = resolvedPath
 	}
 
-	walkFunc := func(itemPath string, fi os.FileInfo, err error) error {
+	// The walk only needs to know whether an entry is a directory or a symlink, which the directory
+	// listing already says; reading it from the DirEntry saves an lstat per entry. That matters
+	// on Windows, where scanning a large image (Server Core is ~76k files) took ~35s.
+	walkFunc := func(itemPath string, d fs.DirEntry, err error) error {
 		if scanCounterEnable {
 			scanCounter.Add(1)
 		}
@@ -1086,7 +1090,7 @@ func (cc *cacheContext) scanPath(ctx context.Context, m *mount, p string, follow
 			cr := &CacheRecord{
 				Type: CacheRecordTypeFile,
 			}
-			if fi.Mode()&os.ModeSymlink != 0 {
+			if d.Type()&fs.ModeSymlink != 0 {
 				cr.Type = CacheRecordTypeSymlink
 				link, err := os.Readlink(itemPath)
 				if err != nil {
@@ -1094,7 +1098,7 @@ func (cc *cacheContext) scanPath(ctx context.Context, m *mount, p string, follow
 				}
 				cr.Linkname = filepath.ToSlash(link)
 			}
-			if fi.IsDir() {
+			if d.IsDir() {
 				cr.Type = CacheRecordTypeDirHeader
 				cr2 := &CacheRecord{
 					Type: CacheRecordTypeDir,

@@ -1,6 +1,7 @@
 package contenthash
 
 import (
+	"io/fs"
 	"path/filepath"
 	"sync"
 
@@ -13,11 +14,11 @@ var (
 	privilegeRefCount int
 )
 
-func (cc *cacheContext) walk(scanPath string, walkFunc filepath.WalkFunc) error {
+func (cc *cacheContext) walk(scanPath string, walkFunc fs.WalkDirFunc) error {
 	// elevating the admin privileges to walk special files/directory
 	// like `System Volume Information`, etc. See similar in #4994
 	return winio.RunWithPrivileges(privileges, func() error {
-		return filepath.Walk(scanPath, walkFunc)
+		return filepath.WalkDir(scanPath, walkFunc)
 	})
 }
 
